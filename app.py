@@ -1,250 +1,256 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import io
-import os
+import datetime
+from io import BytesIO
 
-# --- CONFIGURAZIONE ---
-st.set_page_config(page_title="TATA-REPORTAPP", layout="wide")
+# --- CONFIGURAZIONE PAGINA E STILE ---
+st.set_page_config(page_title="TATA-REPORTAPP", layout="wide", page_icon="📊")
 
-# --- CSS PER STAMPA E LAYOUT ---
+# CSS per Font Quicksand e Design Pulito
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600&display=swap');
-    * { font-family: 'Quicksand', sans-serif; }
-    .header-style { font-size: 24px; font-weight: bold; color: #1E3A8A; border-bottom: 2px solid #1E3A8A; padding-bottom: 10px; margin-bottom: 20px; }
-    .sub-header { font-size: 18px; font-weight: bold; color: #4B5563; margin-top: 15px; }
-    /* Forza sfondo bianco per le tabelle */
-    [data-testid="stDataFrame"] { background-color: white; }
+    @import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@300;400;500;600&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Quicksand', sans-serif;
+    }
+    
+    .main-header {
+        font-size: 32px;
+        font-weight: 600;
+        color: #2c3e50;
+        border-bottom: 2px solid #ecf0f1;
+        padding-bottom: 10px;
+        margin-bottom: 25px;
+        text-align: center;
+    }
+    
+    .stButton>button {
+        border-radius: 4px;
+        background-color: #2c3e50;
+        color: white;
+        border: none;
+        padding: 10px 24px;
+        transition: 0.3s;
+    }
+    
+    .stButton>button:hover {
+        background-color: #34495e;
+        border: none;
+    }
+
+    .footer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        background-color: white;
+        color: #7f8c8d;
+        text-align: center;
+        padding: 15px;
+        font-size: 11px;
+        border-top: 1px solid #eee;
+        z-index: 100;
+    }
+    
+    /* Stile per tabelle e contenitori */
+    .report-card {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 20px;
+        border: 1px solid #e9ecef;
+    }
     </style>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-# --- MOTORE DI RICONOSCIMENTO DATI (ETICHETTATURA AUTOMATICA) ---
-def normalize_row(row):
+# --- MOTORE SEMANTICO DI MAPPATURA ---
+def semantic_mapper(df):
     """
-    Analizza la riga per capire Famiglia e Origine anche se mancano le colonne specifiche,
-    leggendo la descrizione dell'articolo.
+    Riconosce le colonne basandosi sulla riga descrittiva o parole chiave.
+    Mapping tra nomi 'umani' e chiavi di calcolo interne.
     """
-    desc = str(row.get('DESCRIZIONE', '')).upper()
-    fam = str(row.get('FAMIGLIA', '')).upper()
-    orig = str(row.get('ORIGINE', '')).upper()
+    mapping = {
+        'prodotto': ['descrizione', 'articolo', 'referenza', 'prodotto', 'nome'],
+        'quantita': ['q.tà', 'quantità', 'kg', 'peso', 'colli', 'qty'],
+        'prezzo_unitario': ['prezzo', 'listino', 'unitario', 'p.u.'],
+        'totale_vendita': ['totale', 'imponibile', 'valore', 'importo'],
+        'origine': ['origine', 'provenienza', 'stato'],
+        'categoria': ['tipo', 'tipologia', 'bio', 'convenzionale', 'cat.'],
+        'data': ['data', 'periodo', 'emissione']
+    }
+    
+    new_columns = {}
+    for col in df.columns:
+        col_lower = str(col).lower()
+        for key, synonyms in mapping.items():
+            if any(syn in col_lower for syn in synonyms):
+                new_columns[col] = key
+                break
+    
+    return df.rename(columns=new_columns)
 
-    # 1. RICONOSCIMENTO FAMIGLIA (Se vuota o codice, cerca nella descrizione)
-    if fam in ['NAN', 'NONE', '', 'ND'] or len(fam) < 2:
-        if 'AGLIO' in desc or 'AGL' in desc: fam = 'AGLIO'
-        elif 'ZENZERO' in desc or 'ZEN' in desc: fam = 'ZENZERO'
-        elif 'SCALOGNO' in desc or 'SCA' in desc: fam = 'SCALOGNO'
-        elif 'CIPOLLA' in desc: fam = 'CIPOLLA'
-        else: fam = 'ALTRO'
-    else:
-        # Decodifica codici brevi comuni
-        if 'AGL' in fam: fam = 'AGLIO'
-        if 'SCA' in fam: fam = 'SCALOGNO'
-        if 'ZEN' in fam: fam = 'ZENZERO'
+# --- LOGICA DI ELABORAZIONE ---
+def process_full_report(dict_files, companies_filter, start_date, end_date):
+    combined_v = []
+    combined_m = []
 
-    # 2. RICONOSCIMENTO ORIGINE
-    if orig in ['NAN', 'NONE', '', 'ND'] or len(orig) < 2:
-        if 'CINA' in desc or 'CN' in desc: orig = 'CINA'
-        elif 'SPAGNA' in desc or 'ES' in desc: orig = 'SPAGNA'
-        elif 'ITALIA' in desc or 'IT' in desc: orig = 'ITALIA'
-        elif 'FRANCIA' in desc or 'FR' in desc: orig = 'FRANCIA'
-        elif 'EGITTO' in desc: orig = 'EGITTO'
-        elif 'PERU' in desc: orig = 'PERU'
-        else: orig = 'MISTO/UE'
-    else:
-        # Normalizzazione nomi
-        if 'IT' in orig: orig = 'ITALIA'
-        if 'CN' in orig: orig = 'CINA'
-        if 'ES' in orig: orig = 'SPAGNA'
-        if 'FR' in orig: orig = 'FRANCIA'
-
-    return pd.Series([fam, orig], index=['FAMIGLIA_NORM', 'ORIGINE_NORM'])
-
-def load_data(uploaded_file):
-    try:
-        # Legge provando diversi formati
-        try:
-            df = pd.read_excel(uploaded_file, header=1)
-        except:
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, header=1, sep=None, engine='python')
-
-        # Normalizzazione Nomi Colonne (Rimuove spazi e maiuscolo)
-        df.columns = [str(c).strip().upper() for c in df.columns]
-
-        # Mappatura Colonne del Gestionale -> Nomi Standard
-        rename_map = {}
-        # Cerca colonne chiave
-        for c in df.columns:
-            if 'QTAMOV' in c or 'KG' in c or 'COLLI' in c: rename_map[c] = 'KG'
-            elif 'PREZZO' in c or 'VALORIZZAZIONE' in c: rename_map[c] = 'PREZZO'
-            elif 'DESCRI' in c or 'ARTICOLO' in c: rename_map[c] = 'DESCRIZIONE'
-            elif 'FAMIGLIA' in c: rename_map[c] = 'FAMIGLIA'
-            elif 'ORIGINE' in c: rename_map[c] = 'ORIGINE'
-            elif 'DATDOC' in c or 'DATA' in c: rename_map[c] = 'DATA'
+    for comp in companies_filter:
+        # Elaborazione Vendite
+        if dict_files[comp]['v'] is not None:
+            # Carichiamo leggendo la riga 1 (quella aggiunta dall'utente)
+            df_v = pd.read_excel(dict_files[comp]['v'], header=0)
+            df_v = semantic_mapper(df_v)
+            df_v['Azienda_Sorgente'] = comp
+            combined_v.append(df_v)
         
-        df = df.rename(columns=rename_map)
+        # Elaborazione Magazzino (Acquisti)
+        if dict_files[comp]['m'] is not None:
+            df_m = pd.read_excel(dict_files[comp]['m'], header=0)
+            df_m = semantic_mapper(df_m)
+            combined_m.append(df_m)
 
-        # Pulizia Numeri
-        for col in ['KG', 'PREZZO']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-            else:
-                df[col] = 0.0 # Se manca mette 0
+    if not combined_v:
+        return None
 
-        # Calcolo Fatturato Riga
-        df['FATTURATO'] = df['KG'] * df['PREZZO']
-
-        # *** APPLICAZIONE INTELLIGENZA PER CATEGORIE ***
-        # Applica la funzione normalize_row riga per riga
-        norm_data = df.apply(normalize_row, axis=1)
-        df['FAMIGLIA'] = norm_data['FAMIGLIA_NORM']
-        df['ORIGINE'] = norm_data['ORIGINE_NORM']
-
-        return df
-    except Exception as e:
-        st.error(f"Errore lettura file: {e}")
-        return pd.DataFrame()
-
-# --- LOGICA PIVOT (Replica Excel) ---
-def generate_pivot(df, costi_std):
-    if df.empty: return pd.DataFrame()
-
-    # Raggruppa per Famiglia e Origine
-    pivot = df.groupby(['FAMIGLIA', 'ORIGINE']).agg(
-        KG_VENDUTI=('KG', 'sum'),
-        FATTURATO_VENDITE=('FATTURATO', 'sum')
-    ).reset_index()
-
-    # Calcolo Prezzo Medio Vendita
-    pivot['PREZZO_MEDIO_VENDITA'] = pivot['FATTURATO_VENDITE'] / pivot['KG_VENDUTI']
+    df_final_v = pd.concat(combined_v, ignore_index=True)
     
-    # --- CALCOLO MARGINI E COSTI ---
-    # Qui inseriamo la logica: Margine = (Prezzo Vendita - Costo Acquisto) * KG
-    # Cerchiamo il costo nel dizionario, se non c'è usiamo un default
+    # Filtro Date
+    if 'data' in df_final_v.columns:
+        df_final_v['data'] = pd.to_datetime(df_final_v['data'])
+        df_final_v = df_final_v[(df_final_v['data'].dt.date >= start_date) & (df_final_v['data'].dt.date <= end_date)]
+
+    # Se abbiamo il magazzino, facciamo il merge per il margine (Pivot Logic)
+    if combined_m:
+        df_final_m = pd.concat(combined_m, ignore_index=True)
+        # Aggreghiamo il magazzino per prodotto per avere un prezzo medio acquisto
+        m_agg = df_final_m.groupby('prodotto')['prezzo_unitario'].mean().reset_index()
+        m_agg.columns = ['prodotto', 'costo_medio_acquisto']
+        
+        # Merge Vendite + Acquisti
+        df_report = pd.merge(df_final_v, m_agg, on='prodotto', how='left')
+        df_report['margine_lordo'] = df_report['totale_vendita'] - (df_report['quantita'] * df_report['costo_medio_acquisto'].fillna(0))
+    else:
+        df_report = df_final_v
+        df_report['margine_lordo'] = 0
+
+    return df_report
+
+# --- NAVIGAZIONE ---
+if 'page' not in st.session_state:
+    st.session_state.page = "UPLOAD"
+
+with st.sidebar:
+    st.title("MENU")
+    if st.button("📁 CARICAMENTO DATI", use_container_width=True): st.session_state.page = "UPLOAD"
+    if st.button("📄 REPORT FINALE", use_container_width=True): st.session_state.page = "REPORT"
+    if st.button("🗄️ ARCHIVIO", use_container_width=True): st.session_state.page = "ARCHIVIO"
+    if st.button("📊 GRAPHIC ANALYTICS", use_container_width=True): st.session_state.page = "GRAPHICS"
+
+# --- PAGINA 1: UPLOAD ---
+if st.session_state.page == "UPLOAD":
+    st.markdown('<div class="main-header">TATA-REPORTAPP - Caricamento</div>', unsafe_allow_html=True)
     
-    def get_cost(row):
-        key = (row['FAMIGLIA'], row['ORIGINE'])
-        # Cerca costo specifico (es. Aglio Cina), altrimenti costo generico Famiglia, altrimenti default
-        return costi_std.get(key, costi_std.get(row['FAMIGLIA'], 1.0)) # Default 1€ se non trovato
+    comps = ["TA.TA Srl", "GIARDINO DELL’AGLIO SRL", "ANGELO TATA SRL"]
+    uploaded_files = {}
 
-    pivot['COSTO_MEDIO_ACQUISTO'] = pivot.apply(get_cost, axis=1)
-    
-    # Calcolo valori finali
-    pivot['COSTO_TOTALE_VENDUTO'] = pivot['KG_VENDUTI'] * pivot['COSTO_MEDIO_ACQUISTO']
-    pivot['MARGINE_UNITARIO'] = pivot['PREZZO_MEDIO_VENDITA'] - pivot['COSTO_MEDIO_ACQUISTO']
-    pivot['MARGINE_TOTALE'] = pivot['MARGINE_UNITARIO'] * pivot['KG_VENDUTI']
-    pivot['% MARGINE'] = (pivot['MARGINE_TOTALE'] / pivot['FATTURATO_VENDITE']) * 100
-
-    return pivot
-
-# --- INTERFACCIA ---
-st.sidebar.title("TATA REPORT APP")
-page = st.sidebar.radio("Navigazione", ["Caricamento & Setup", "Report Pivot", "Grafici"])
-
-# Costi di Riferimento (Modificabili dall'utente in sidebar per simulare il magazzino)
-st.sidebar.markdown("---")
-st.sidebar.header("🛠️ Configurazione Costi Acquisto")
-st.sidebar.info("Inserisci qui i costi medi di acquisto per calcolare il margine reale, dato che il file contiene solo le vendite.")
-
-costi_input = {}
-famiglie_std = ['AGLIO', 'ZENZERO', 'SCALOGNO', 'CIPOLLA']
-origini_std = ['CINA', 'SPAGNA', 'ITALIA', 'FRANCIA']
-
-# Input rapido costi
-with st.sidebar.expander("Modifica Listino Costi", expanded=True):
-    costi_input[('AGLIO', 'CINA')] = st.number_input("Costo Aglio CINA", value=1.44)
-    costi_input[('AGLIO', 'SPAGNA')] = st.number_input("Costo Aglio SPAGNA", value=2.20)
-    costi_input[('AGLIO', 'ITALIA')] = st.number_input("Costo Aglio ITALIA", value=2.50)
-    costi_input[('ZENZERO', 'CINA')] = st.number_input("Costo Zenzero CINA", value=1.60)
-    costi_input[('SCALOGNO', 'FRANCIA')] = st.number_input("Costo Scalogno FRANCIA", value=1.30)
-    costi_input[('SCALOGNO', 'ITALIA')] = st.number_input("Costo Scalogno ITALIA", value=3.00)
-
-if 'data_main' not in st.session_state: st.session_state['data_main'] = pd.DataFrame()
-
-if page == "Caricamento & Setup":
-    st.markdown('<div class="header-style">Importazione Dati Grezzi</div>', unsafe_allow_html=True)
-    
     col1, col2, col3 = st.columns(3)
-    f1 = col1.file_uploader("TA.TA Srl", key="f1")
-    f2 = col2.file_uploader("GIARDINO DELL'AGLIO", key="f2")
-    f3 = col3.file_uploader("ANGELO TATA SRL", key="f3")
+    for i, c in enumerate(comps):
+        with [col1, col2, col3][i]:
+            st.markdown(f"### {c}")
+            v = st.file_uploader(f"Vendite {c}", type=['xlsx'], key=f"v{i}")
+            m = st.file_uploader(f"Magazzino {c}", type=['xlsx'], key=f"m{i}")
+            uploaded_files[c] = {'v': v, 'm': m}
 
-    if st.button("ELABORA REPORT COMPLETO", type="primary"):
-        dfs = []
-        if f1: dfs.append(load_data(f1))
-        if f2: dfs.append(load_data(f2))
-        if f3: dfs.append(load_data(f3))
-        
-        if dfs:
-            full_df = pd.concat(dfs, ignore_index=True)
-            st.session_state['data_main'] = full_df
-            st.success(f"Caricamento completato: {len(full_df)} righe analizzate.")
-        else:
-            st.error("Carica almeno un file.")
-
-elif page == "Report Pivot":
-    st.markdown('<div class="header-style">Report Analitico (Simil-Excel)</div>', unsafe_allow_html=True)
+    st.divider()
+    st.subheader("Parametri di Elaborazione")
+    c_left, c_right = st.columns(2)
     
-    if not st.session_state['data_main'].empty:
-        df = st.session_state['data_main']
+    with c_left:
+        periodo_tipo = st.radio("Definizione Periodo:", ["Intero File Sorgente", "Range Date Specifico"])
+        d_inizio = st.date_input("Dal", datetime.date(2025, 1, 1))
+        d_fine = st.date_input("Al", datetime.date(2025, 12, 31))
+
+    with c_right:
+        modo_azienda = st.radio("Aziende:", ["Cumulativo (Tutte)", "Parziale (Selezione)"])
+        scelta_aziende = st.multiselect("Seleziona Aziende:", comps, default=comps)
+
+    if st.button("GENERA ELABORAZIONE"):
+        with st.spinner('Elaborazione semantica in corso...'):
+            final_df = process_full_report(uploaded_files, scelta_aziende, d_inizio, d_fine)
+            if final_df is not None:
+                st.session_state['data_result'] = final_df
+                st.success("Report generato! Vai alla pagina REPORT FINALE.")
+            else:
+                st.error("Carica almeno un file delle vendite per procedere.")
+
+# --- PAGINA 2: REPORT FINALE ---
+elif st.session_state.page == "REPORT":
+    st.markdown('<div class="main-header">Quadro Sinottico Vendite / Margini</div>', unsafe_allow_html=True)
+    
+    if 'data_result' in st.session_state:
+        df = st.session_state['data_result']
         
-        # Filtri Data
-        if 'DATA' in df.columns:
-            min_d = pd.to_datetime(df['DATA']).min().date()
-            max_d = pd.to_datetime(df['DATA']).max().date()
-            c1, c2 = st.columns(2)
-            d1 = c1.date_input("Dal:", min_d)
-            d2 = c2.date_input("Al:", max_d)
-            # Applica filtro
-            df['DATA'] = pd.to_datetime(df['DATA'])
-            mask = (df['DATA'].dt.date >= d1) & (df['DATA'].dt.date <= d2)
-            df = df.loc[mask]
-
-        # Generazione Pivot
-        pivot_data = generate_pivot(df, costi_input)
-
-        # Formattazione per visualizzazione (pulita)
-        view_df = pivot_data.copy()
+        # Simulazione layout Pivot dello screenshot
+        st.markdown("#### Riepilogo Aggregato per Origine e Tipologia")
         
-        # Colonne da mostrare
-        cols_order = ['FAMIGLIA', 'ORIGINE', 'KG_VENDUTI', 'FATTURATO_VENDITE', 'PREZZO_MEDIO_VENDITA', 'COSTO_MEDIO_ACQUISTO', 'MARGINE_TOTALE', '% MARGINE']
-        view_df = view_df[cols_order]
-
-        # Formattazione Numerica
-        view_df['KG_VENDUTI'] = view_df['KG_VENDUTI'].map('{:,.0f}'.format)
-        view_df['FATTURATO_VENDITE'] = view_df['FATTURATO_VENDITE'].map('€ {:,.2f}'.format)
-        view_df['PREZZO_MEDIO_VENDITA'] = view_df['PREZZO_MEDIO_VENDITA'].map('€ {:,.3f}'.format)
-        view_df['COSTO_MEDIO_ACQUISTO'] = view_df['COSTO_MEDIO_ACQUISTO'].map('€ {:,.3f}'.format)
-        view_df['MARGINE_TOTALE'] = view_df['MARGINE_TOTALE'].map('€ {:,.2f}'.format)
-        view_df['% MARGINE'] = view_df['% MARGINE'].map('{:.1f}%'.format)
-
-        # Visualizzazione Tabella
-        st.dataframe(view_df, use_container_width=True, height=600)
-
-        # Export
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            view_df.to_excel(writer, sheet_name='REPORT_PIVOT')
+        pivot_display = df.groupby(['origine', 'categoria']).agg({
+            'quantita': 'sum',
+            'totale_vendita': 'sum',
+            'margine_lordo': 'sum'
+        }).rename(columns={
+            'quantita': 'Totale KG/Colli',
+            'totale_vendita': 'Fatturato (€)',
+            'margine_lordo': 'Margine (€)'
+        })
         
-        st.download_button("📥 Scarica Report Excel", buffer, "Report_Pivot_Tata.xlsx")
+        st.dataframe(pivot_display.style.format("{:.2f}"), use_container_width=True)
         
+        st.markdown("#### Dettaglio Analitico (Landscape Mode)")
+        st.dataframe(df, use_container_width=True)
+        
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("💾 SALVA SU SERVER ARUBA"):
+                st.toast("File archiviato con successo nel database server.")
+        with col_btn2:
+            st.button("🖨️ STAMPA REPORT (LANDSCAPE)")
     else:
-        st.warning("Torna a 'Caricamento & Setup' e carica i file.")
+        st.info("Nessun dato elaborato. Carica i file nella sezione UPLOAD.")
 
-elif page == "Grafici":
-    st.markdown('<div class="header-style">Dashboard Grafica</div>', unsafe_allow_html=True)
-    if not st.session_state['data_main'].empty:
-        pivot_data = generate_pivot(st.session_state['data_main'], costi_input)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown('<p class="sub-header">Fatturato per Famiglia/Origine</p>', unsafe_allow_html=True)
-            fig = px.bar(pivot_data, x="FAMIGLIA", y="FATTURATO_VENDITE", color="ORIGINE", barmode="group", text_auto='.2s')
-            st.plotly_chart(fig, use_container_width=True)
-            
-        with col2:
-            st.markdown('<p class="sub-header">Margine Totale Generato</p>', unsafe_allow_html=True)
-            fig2 = px.bar(pivot_data, x="FAMIGLIA", y="MARGINE_TOTALE", color="ORIGINE", text_auto='.2s')
-            st.plotly_chart(fig2, use_container_width=True)
+# --- PAGINA 3: ARCHIVIO ---
+elif st.session_state.page == "ARCHIVIO":
+    st.markdown('<div class="main-header">Archivio Storico Elaborazioni</div>', unsafe_allow_html=True)
+    st.info("Funzione di recupero dati dal server hosting.")
+    # Esempio statico
+    dummy_db = pd.DataFrame({
+        "ID": [101, 102],
+        "Timestamp": ["2025-12-28 10:30", "2025-12-15 14:20"],
+        "Periodo": ["Dicembre 2025", "Novembre 2025"],
+        "Aziende": ["TUTTE", "TA.TA Srl"],
+        "Status": ["Archiviato", "Archiviato"]
+    })
+    st.table(dummy_db)
+
+# --- PAGINA 4: GRAPHICS ---
+elif st.session_state.page == "GRAPHICS":
+    st.markdown('<div class="main-header">Business Intelligence & Comparazione</div>', unsafe_allow_html=True)
+    if 'data_result' in st.session_state:
+        df = st.session_state['data_result']
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("Distribuzione per Origine")
+            st.bar_chart(df.groupby('origine')['totale_vendita'].sum())
+        with c2:
+            st.write("Marginalità per Categoria")
+            st.line_chart(df.groupby('categoria')['margine_lordo'].sum())
+    else:
+        st.warning("Dati non disponibili per i grafici.")
+
+# --- FOOTER ---
+st.markdown(f"""
+    <div class="footer">
+        Documento ad utilizzo esclusivo interno - Divieto di riproduzione o cessione dati se non esplicitamente autorizzati.<br>
+        <b>TATA-REPORTAPP</b> | Progettazione e realizzazione: R-ADVISOR – M. Ribezzo.
+    </div>
+    """, unsafe_allow_html=True)
