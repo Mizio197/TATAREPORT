@@ -1,6 +1,5 @@
 streamlit
 pandas
 openpyxl
-plotly
 xlsxwriter
-fpdf2  # Per la generazione dei PDF in orizzontale
+plotly
