@@ -21,7 +21,6 @@ st.markdown("""
         font-family: 'Quicksand', sans-serif;
     }
     
-    /* Stile per l'intestazione */
     .header-style {
         font-size: 24px;
         font-weight: bold;
@@ -31,7 +30,6 @@ st.markdown("""
         margin-bottom: 20px;
     }
     
-    /* Nascondi elementi non necessari in stampa */
     @media print {
         div[data-testid="stSidebar"] {display: none;}
         .stButton {display: none;}
@@ -40,7 +38,6 @@ st.markdown("""
         #archivio-footer {display: block !important; position: fixed; bottom: 0; width: 100%; text-align: center; font-size: 10px; color: grey;}
     }
     
-    /* Footer personalizzato */
     .footer {
         position: fixed;
         left: 0;
@@ -56,21 +53,25 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- FUNZIONI DI ELABORAZIONE DATI (LOGICA BUSINESS) ---
+# --- FUNZIONI DI ELABORAZIONE DATI ---
 
 def load_data(file):
-    """Carica CSV o Excel e gestisce errori."""
+    """Carica CSV, XLS o XLSX e gestisce errori."""
     if file is None:
         return None
     try:
+        # Gestione estensione
         if file.name.endswith('.csv'):
-            # Prova diversi separatori comuni nei CSV italiani
             try:
-                df = pd.read_csv(file, sep=';', encoding='latin1') # Tipico formato italiano
+                df = pd.read_csv(file, sep=';', encoding='latin1')
             except:
                 file.seek(0)
                 df = pd.read_csv(file, sep=',', encoding='utf-8')
+        elif file.name.endswith('.xls'):
+            # Richiede xlrd installato
+            df = pd.read_excel(file, engine='xlrd')
         else:
+            # Default per .xlsx
             df = pd.read_excel(file)
         return df
     except Exception as e:
@@ -78,18 +79,11 @@ def load_data(file):
         return None
 
 def pulisci_e_standardizza(df, tipo):
-    """
-    Normalizza i nomi delle colonne basandosi sui file 'FOCUS' forniti.
-    tipo: 'vendite' o 'acquisti'
-    """
     if df is None:
         return None
     
-    # Mappa colonne basata sui tuoi file CSV
-    # Normalizziamo in maiuscolo per evitare errori di case-sensitivity
-    df.columns = [c.strip().upper() for c in df.columns]
+    df.columns = [str(c).strip().upper() for c in df.columns]
     
-    # Converti colonne data
     cols_data = [c for c in df.columns if 'DATA' in c]
     for c in cols_data:
         df[c] = pd.to_datetime(df[c], errors='coerce')
@@ -97,44 +91,29 @@ def pulisci_e_standardizza(df, tipo):
     return df
 
 def elabora_report(df_vendite, df_acquisti, data_inizio, data_fine, azienda):
-    """
-    Logica CORE: replica il foglio 'REPORT acq vend mese'.
-    1. Filtra per data.
-    2. Raggruppa Vendite per ORIGINE (o famiglia/articolo).
-    3. Raggruppa Acquisti per ORIGINE per trovare il costo medio.
-    4. Unisce i dati e calcola i margini.
-    """
-    
-    # 1. Filtro Data
+    # 1. Filtro Data Vendite
     if df_vendite is not None:
         col_data_v = next((c for c in df_vendite.columns if 'DATA' in c), None)
         if col_data_v:
             df_vendite = df_vendite[(df_vendite[col_data_v] >= pd.to_datetime(data_inizio)) & 
                                     (df_vendite[col_data_v] <= pd.to_datetime(data_fine))]
 
+    # 2. Filtro Data Acquisti
     if df_acquisti is not None:
         col_data_a = next((c for c in df_acquisti.columns if 'DATA' in c), None)
         if col_data_a:
             df_acquisti = df_acquisti[(df_acquisti[col_data_a] >= pd.to_datetime(data_inizio)) & 
                                       (df_acquisti[col_data_a] <= pd.to_datetime(data_fine))]
 
-    # Se non abbiamo dati dopo il filtro
     if (df_vendite is None or df_vendite.empty) and (df_acquisti is None or df_acquisti.empty):
         return None
 
-    risultati = []
-
-    # --- LOGICA PIVOT: Raggruppamento per ORIGINE ---
-    # Cerchiamo la colonna ORIGINE
-    col_origine_v = 'ORIGINE' if 'ORIGINE' in df_vendite.columns else df_vendite.columns[0]
-    
-    # A. Aggregazione VENDITE
+    # --- LOGICA PIVOT ---
     if df_vendite is not None and not df_vendite.empty:
-        # Cerchiamo colonne KG e FATTURATO
+        col_origine_v = 'ORIGINE' if 'ORIGINE' in df_vendite.columns else df_vendite.columns[0]
         col_kg_v = next((c for c in df_vendite.columns if 'KG' in c and 'PREZZO' not in c), 'KG')
         col_fatt_v = next((c for c in df_vendite.columns if 'FATTURATO' in c or 'IMPORTO' in c), 'FATTURATO')
         
-        # Assicuriamoci che siano numerici
         df_vendite[col_kg_v] = pd.to_numeric(df_vendite[col_kg_v], errors='coerce').fillna(0)
         df_vendite[col_fatt_v] = pd.to_numeric(df_vendite[col_fatt_v], errors='coerce').fillna(0)
         
@@ -145,9 +124,9 @@ def elabora_report(df_vendite, df_acquisti, data_inizio, data_fine, azienda):
         pivot_vendite.rename(columns={col_kg_v: 'KG_VENDUTI', col_fatt_v: 'FATTURATO_VENDITA'}, inplace=True)
         pivot_vendite['PREZZO_MEDIO_VENDITA'] = pivot_vendite['FATTURATO_VENDITA'] / pivot_vendite['KG_VENDUTI']
     else:
-        pivot_vendite = pd.DataFrame(columns=[col_origine_v, 'KG_VENDUTI', 'FATTURATO_VENDITA', 'PREZZO_MEDIO_VENDITA'])
+        # Fallback vuoto se mancano le vendite ma ci sono acquisti
+        pivot_vendite = pd.DataFrame(columns=['ORIGINE', 'KG_VENDUTI', 'FATTURATO_VENDITA', 'PREZZO_MEDIO_VENDITA'])
 
-    # B. Aggregazione ACQUISTI (per calcolare il Costo Medio)
     if df_acquisti is not None and not df_acquisti.empty:
         col_origine_a = 'ORIGINE' if 'ORIGINE' in df_acquisti.columns else df_acquisti.columns[0]
         col_kg_a = next((c for c in df_acquisti.columns if 'KG' in c and 'COSTO' not in c), 'KG ACQUISTATI')
@@ -160,41 +139,47 @@ def elabora_report(df_vendite, df_acquisti, data_inizio, data_fine, azienda):
             col_kg_a: 'sum',
             col_costo_a: 'sum'
         }).reset_index()
-        # Calcolo Costo Medio Ponderato per origine
         pivot_acquisti['COSTO_MEDIO_ACQUISTO'] = pivot_acquisti[col_costo_a] / pivot_acquisti[col_kg_a]
         pivot_acquisti = pivot_acquisti[[col_origine_a, 'COSTO_MEDIO_ACQUISTO', col_kg_a, col_costo_a]]
     else:
-        pivot_acquisti = pd.DataFrame(columns=['ORIGINE', 'COSTO_MEDIO_ACQUISTO', 'KG_ACQUISTATI', 'COSTO_TOTALE'])
+        pivot_acquisti = pd.DataFrame(columns=['ORIGINE', 'COSTO_MEDIO_ACQUISTO'])
 
-    # C. MERGE (Unione Logica)
-    # Uniamo Vendite e Costi basandoci sull'ORIGINE
-    if not pivot_vendite.empty:
-        report_finale = pd.merge(pivot_vendite, pivot_acquisti, left_on=col_origine_v, right_on='ORIGINE', how='left')
-        
-        # Gestione NaN (se vendiamo qualcosa che non abbiamo comprato nel periodo, o viceversa)
-        report_finale['COSTO_MEDIO_ACQUISTO'] = report_finale['COSTO_MEDIO_ACQUISTO'].fillna(0)
-        
-        # D. Calcoli Finali (Margini come da file REPORT)
-        # MARGINE 1 = (Prezzo Medio Vendita - Costo Medio Acquisto) * KG Venduti
-        report_finale['COSTO_VENDUTO_TEORICO'] = report_finale['KG_VENDUTI'] * report_finale['COSTO_MEDIO_ACQUISTO']
-        report_finale['MARGINE_1_VALORE'] = report_finale['FATTURATO_VENDITA'] - report_finale['COSTO_VENDUTO_TEORICO']
-        report_finale['MARGINE_PERCENTUALE'] = (report_finale['MARGINE_1_VALORE'] / report_finale['FATTURATO_VENDITA']) * 100
-        
-        report_finale['AZIENDA'] = azienda
-        return report_finale
+    # --- MERGE ---
+    # Usiamo 'ORIGINE' come chiave se esiste in pivot_vendite, altrimenti creiamo struttura vuota
+    if 'ORIGINE' in pivot_vendite.columns:
+        report_finale = pd.merge(pivot_vendite, pivot_acquisti, left_on='ORIGINE', right_on='ORIGINE', how='left')
+    elif not pivot_acquisti.empty:
+         # Se abbiamo solo acquisti e niente vendite (caso raro ma possibile per controllo magazzino)
+         report_finale = pivot_acquisti.copy()
+         report_finale['KG_VENDUTI'] = 0
+         report_finale['FATTURATO_VENDITA'] = 0
+         report_finale['PREZZO_MEDIO_VENDITA'] = 0
     else:
         return None
+        
+    report_finale['COSTO_MEDIO_ACQUISTO'] = report_finale['COSTO_MEDIO_ACQUISTO'].fillna(0)
+    
+    # Calcoli Margini
+    report_finale['COSTO_VENDUTO_TEORICO'] = report_finale['KG_VENDUTI'] * report_finale['COSTO_MEDIO_ACQUISTO']
+    report_finale['MARGINE_1_VALORE'] = report_finale['FATTURATO_VENDITA'] - report_finale['COSTO_VENDUTO_TEORICO']
+    
+    # Evitiamo divisione per zero
+    report_finale['MARGINE_PERCENTUALE'] = report_finale.apply(
+        lambda x: (x['MARGINE_1_VALORE'] / x['FATTURATO_VENDITA'] * 100) if x['FATTURATO_VENDITA'] != 0 else 0, axis=1
+    )
+    
+    report_finale['AZIENDA'] = azienda
+    return report_finale
+
 
 # --- UI: SIDEBAR DI NAVIGAZIONE ---
 st.sidebar.title("NAVIGAZIONE")
 pagina = st.sidebar.radio("Vai a:", ["1. Input Dati", "2. Elaborazione Report", "3. Archivio", "4. Grafica & Analisi"])
 
-# Cartella di salvataggio
 SAVE_DIR = "archivio_report"
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
 
-# Inizializzazione Session State per passare dati tra pagine
 if 'data_storage' not in st.session_state:
     st.session_state['data_storage'] = {}
 
@@ -203,10 +188,6 @@ if pagina == "1. Input Dati":
     st.markdown('<div class="header-style">INSERIMENTO DATI GREZZI</div>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns(3)
-    
-    files_input = {}
-    
-    # Definizione delle 3 Aziende
     aziende = ["TA.TA Srl", "GIARDINO DELL'AGLIO SRL", "ANGELO TATA SRL"]
     cols = [col1, col2, col3]
     
@@ -214,8 +195,9 @@ if pagina == "1. Input Dati":
         with cols[i]:
             st.subheader(azienda)
             st.info("Area Drag & Drop")
-            f_vendite = st.file_uploader(f"Vendite {azienda}", type=['xlsx', 'csv'], key=f"v_{i}")
-            f_magazzino = st.file_uploader(f"Magazzino {azienda}", type=['xlsx', 'csv'], key=f"m_{i}")
+            # MODIFICA QUI: Aggiunto 'xls' alla lista dei tipi
+            f_vendite = st.file_uploader(f"Vendite {azienda}", type=['xlsx', 'xls', 'csv'], key=f"v_{i}")
+            f_magazzino = st.file_uploader(f"Magazzino {azienda}", type=['xlsx', 'xls', 'csv'], key=f"m_{i}")
             
             if f_vendite:
                 df = load_data(f_vendite)
@@ -232,7 +214,6 @@ if pagina == "1. Input Dati":
     st.markdown("---")
     st.subheader("Impostazioni di Elaborazione")
     
-    # Controlli a Slitta (Toggle)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         usa_periodo_file = st.toggle("Periodo da File Sorgente", value=True)
@@ -243,14 +224,12 @@ if pagina == "1. Input Dati":
     with c4:
         aziende_sel = st.multiselect("Report Parziale per:", aziende, default=aziende)
 
-    # Date Range Picker
     if usa_periodo_custom and not usa_periodo_file:
         col_date1, col_date2 = st.columns(2)
         start_date = col_date1.date_input("Data Inizio", datetime(2025, 1, 1))
         end_date = col_date2.date_input("Data Fine", datetime(2025, 12, 31))
         st.session_state['periodo'] = (start_date, end_date)
     else:
-        # Default ampio se si usa il file sorgente (verrà filtrato implicitamente dai dati presenti)
         st.session_state['periodo'] = (datetime(2000, 1, 1), datetime(2100, 12, 31))
 
     st.session_state['config'] = {
@@ -282,7 +261,6 @@ elif pagina == "2. Elaborazione Report":
         if dfs_elaborati:
             df_finale = pd.concat(dfs_elaborati, ignore_index=True)
             
-            # Formattazione per visualizzazione
             st.dataframe(df_finale.style.format({
                 'FATTURATO_VENDITA': "€ {:,.2f}",
                 'PREZZO_MEDIO_VENDITA': "€ {:,.2f}",
@@ -292,7 +270,6 @@ elif pagina == "2. Elaborazione Report":
                 'KG_VENDUTI': "{:,.1f}"
             }), use_container_width=True)
             
-            # Totali Generali (Riga Somma)
             st.subheader("Totali Generali")
             totali = df_finale[['KG_VENDUTI', 'FATTURATO_VENDITA', 'MARGINE_1_VALORE']].sum()
             col_met1, col_met2, col_met3 = st.columns(3)
@@ -300,7 +277,6 @@ elif pagina == "2. Elaborazione Report":
             col_met2.metric("Totale Fatturato", f"€ {totali['FATTURATO_VENDITA']:,.2f}")
             col_met3.metric("Totale Margine", f"€ {totali['MARGINE_1_VALORE']:,.2f}")
 
-            # Salvataggio
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 df_finale.to_excel(writer, sheet_name='Report', index=False)
@@ -309,90 +285,49 @@ elif pagina == "2. Elaborazione Report":
             
             c_save1, c_save2 = st.columns(2)
             with c_save1:
-                st.download_button(
-                    label="💾 SCARICA FILE EXCEL",
-                    data=buffer.getvalue(),
-                    file_name=file_name,
-                    mime="application/vnd.ms-excel"
-                )
+                st.download_button("💾 SCARICA FILE EXCEL", buffer.getvalue(), file_name, "application/vnd.ms-excel")
             with c_save2:
                 if st.button("SALVA IN ARCHIVIO SERVER"):
                     with open(os.path.join(SAVE_DIR, file_name), "wb") as f:
                         f.write(buffer.getvalue())
                     st.success(f"Salvato in {SAVE_DIR}/{file_name}")
-
         else:
             st.info("Nessun dato trovato per il periodo selezionato.")
 
 # --- PAGINA 3: ARCHIVIO ---
 elif pagina == "3. Archivio":
     st.markdown('<div class="header-style">ARCHIVIO STORICO REPORT</div>', unsafe_allow_html=True)
-    
     files = sorted(os.listdir(SAVE_DIR), reverse=True)
     if not files:
         st.write("L'archivio è vuoto.")
     else:
         for f in files:
             col_f1, col_f2, col_f3 = st.columns([3, 1, 1])
-            with col_f1:
-                st.write(f"📄 {f}")
+            with col_f1: st.write(f"📄 {f}")
             with col_f2:
-                file_path = os.path.join(SAVE_DIR, f)
-                with open(file_path, "rb") as file:
+                with open(os.path.join(SAVE_DIR, f), "rb") as file:
                     st.download_button("Scarica", file, file_name=f)
             with col_f3:
-                # Opzione per caricare questo file in Pagina 4 per analisi
                 if st.button("Analizza", key=f"btn_{f}"):
-                    st.session_state['file_analisi'] = file_path
+                    st.session_state['file_analisi'] = os.path.join(SAVE_DIR, f)
                     st.success("Caricato per analisi in Pagina 4")
 
 # --- PAGINA 4: GRAFICA E ANALISI ---
 elif pagina == "4. Grafica & Analisi":
     st.markdown('<div class="header-style">ANALISI DATI COMPARATA</div>', unsafe_allow_html=True)
     
-    # Caricamento Dati
     df_analysis = None
     if 'file_analisi' in st.session_state:
-        st.info(f"Analizzando il file: {os.path.basename(st.session_state['file_analisi'])}")
+        st.info(f"Analizzando: {os.path.basename(st.session_state['file_analisi'])}")
         df_analysis = pd.read_excel(st.session_state['file_analisi'])
-    else:
-        st.info("Seleziona un file dall'Archivio (Pagina 3) oppure usa i dati elaborati correnti.")
     
     if df_analysis is not None:
-        # Griglia di Scelta Analisi
-        tipo_analisi = st.selectbox("Seleziona Tipo Analisi", 
-                     ["Performance per Origine", "Performance per Azienda", "Analisi Margini"])
-        
-        col_chart1, col_chart2 = st.columns(2)
-        
+        tipo_analisi = st.selectbox("Seleziona Tipo Analisi", ["Performance per Origine", "Analisi Margini"])
         if tipo_analisi == "Performance per Origine":
-            fig1 = px.bar(df_analysis, x='ORIGINE', y='FATTURATO_VENDITA', color='AZIENDA', 
-                          title="Fatturato per Origine", template="simple_white",
-                          color_discrete_sequence=px.colors.qualitative.Pastel)
-            col_chart1.plotly_chart(fig1, use_container_width=True)
-            
-            fig2 = px.pie(df_analysis, names='ORIGINE', values='KG_VENDUTI', 
-                          title="Ripartizione Volumi (KG)", template="simple_white",
-                          color_discrete_sequence=px.colors.qualitative.Pastel)
-            col_chart2.plotly_chart(fig2, use_container_width=True)
-
-        elif tipo_analisi == "Performance per Azienda":
-            fig1 = px.bar(df_analysis, x='AZIENDA', y=['FATTURATO_VENDITA', 'MARGINE_1_VALORE'], 
-                          barmode='group', title="Confronto Fatturato vs Margine",
-                          template="simple_white", color_discrete_sequence=['#4a90e2', '#50e3c2'])
+            fig1 = px.bar(df_analysis, x='ORIGINE', y='FATTURATO_VENDITA', color='AZIENDA', title="Fatturato per Origine", template="simple_white")
             st.plotly_chart(fig1, use_container_width=True)
-
         elif tipo_analisi == "Analisi Margini":
-            fig1 = px.scatter(df_analysis, x='PREZZO_MEDIO_VENDITA', y='MARGINE_PERCENTUALE', 
-                              size='KG_VENDUTI', color='ORIGINE', hover_name='ORIGINE',
-                              title="Elasticità Prezzo / Margine (Dimensione bolla = Volumi)",
-                              template="simple_white")
+            fig1 = px.scatter(df_analysis, x='PREZZO_MEDIO_VENDITA', y='MARGINE_PERCENTUALE', size='KG_VENDUTI', color='ORIGINE', title="Margini vs Prezzi", template="simple_white")
             st.plotly_chart(fig1, use_container_width=True)
 
-# --- FOOTER ---
-st.markdown("""
-    <div class="footer">
-        <p>TATA-REPORTAPP | Utilizzo esclusivo interno - Vietata la riproduzione.</p>
-        <p>Project: R-ADVISOR – M. Ribezzo</p>
-    </div>
-""", unsafe_allow_html=True)
+st.markdown("""<div class="footer"><p>TATA-REPORTAPP | Project: R-ADVISOR – M. Ribezzo</p></div>""", unsafe_allow_html=True)
