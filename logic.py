@@ -1,4 +1,5 @@
 import pandas as pd
+import io
 
 # Mappa basata sui tuoi file "ESTRATTO DA APPLICATIVO" e "MAGAZZINO"
 MAPPA_VENDITE = {
@@ -25,13 +26,21 @@ MAPPA_MAGAZZINO = {
 def load_data(file, tipo="VENDITE"):
     if file is None: return None
     
+    df = None
+    
     try:
+        # --- LOGICA PER VENDITE ---
         if tipo == "VENDITE":
-            # I tuoi file vendite hanno una riga descrittiva in alto aggiunta da te.
-            # I codici tecnici (mmcodcon) sono nella riga 2 (index 1).
-            df = pd.read_csv(file, header=1, sep=None, engine='python')
+            # Strategia 1: Prova a leggere come EXCEL vero (risolve l'errore 0xd0)
+            try:
+                df = pd.read_excel(file, header=1)
+            except:
+                # Se fallisce, resetta il file e prova come CSV (testo)
+                file.seek(0)
+                # 'latin1' è più permissivo di 'utf-8' per i file gestionali vecchi
+                df = pd.read_csv(file, header=1, sep=None, engine='python', encoding='latin1')
             
-            # Rinomina
+            # Rinomina colonne
             df = df.rename(columns=MAPPA_VENDITE)
             
             # Pulizia colonne numeriche
@@ -40,30 +49,30 @@ def load_data(file, tipo="VENDITE"):
                 if c in df.columns:
                     df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             
-            # Aggiunge colonna fittizia per esempio se manca
+            # Gestione Data mancante
             if 'DATA' not in df.columns and 'mmdatdoc' not in df.columns:
-                 df['DATA'] = pd.to_datetime('today') # Fallback se non trova data
-                 
-            return df
-            
+                 df['DATA'] = pd.to_datetime('today')
+
+        # --- LOGICA PER MAGAZZINO ---
         elif tipo == "MAGAZZINO":
-            # Il file magazzino sembra avere l'header alla riga 1 (index 0)
-            if file.name.endswith('.csv'):
-                df = pd.read_csv(file, sep=None, engine='python')
-            else:
+            # Strategia: Prova Excel, poi CSV
+            try:
                 df = pd.read_excel(file)
+            except:
+                file.seek(0)
+                df = pd.read_csv(file, sep=None, engine='python', encoding='latin1')
                 
             df = df.rename(columns=MAPPA_MAGAZZINO)
             
-            # Calcolo costo medio rapido
+            # Calcolo costo medio
             if 'KG_ACQ' in df.columns and 'COSTO_TOT' in df.columns:
                 df['KG_ACQ'] = pd.to_numeric(df['KG_ACQ'], errors='coerce').fillna(0)
                 df['COSTO_TOT'] = pd.to_numeric(df['COSTO_TOT'], errors='coerce').fillna(0)
                 # Evita divisione per zero
-                df = df[df['KG_ACQ'] > 0]
-                df['COSTO_MEDIO'] = df['COSTO_TOT'] / df['KG_ACQ']
-            
-            return df
+                mask = df['KG_ACQ'] > 0
+                df.loc[mask, 'COSTO_MEDIO'] = df.loc[mask, 'COSTO_TOT'] / df.loc[mask, 'KG_ACQ']
             
     except Exception as e:
-        return str(e) # Ritorna l'errore se c'è
+        return f"Errore critico lettura file: {str(e)}"
+
+    return df
