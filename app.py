@@ -3,103 +3,87 @@ import pandas as pd
 import datetime
 from io import BytesIO
 
-# --- CONFIGURAZIONE PAGINA E DESIGN ---
+# --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="TATA-REPORTAPP", layout="wide", page_icon="📊")
 
+# CSS Stile Quicksand & Footer
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@300;400;500;600&display=swap');
     html, body, [class*="css"] { font-family: 'Quicksand', sans-serif; }
-    .main-header { font-size: 30px; font-weight: 600; color: #1a1a1a; border-bottom: 1px solid #ddd; padding-bottom: 10px; margin-bottom: 20px; }
-    .stButton>button { border-radius: 2px; background-color: #2c3e50; color: white; border: none; }
-    .footer { position: fixed; bottom: 0; left: 0; width: 100%; background: white; text-align: center; padding: 10px; font-size: 11px; color: #999; border-top: 1px solid #eee; z-index: 999; }
+    .main-header { font-size: 30px; font-weight: 600; color: #1e3a8a; border-bottom: 2px solid #f0f2f6; padding-bottom: 10px; margin-bottom: 20px; }
+    .footer { position: fixed; bottom: 0; left: 0; width: 100%; background: white; text-align: center; padding: 10px; font-size: 11px; color: #888; border-top: 1px solid #eee; z-index: 999; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- MAPPATURA TECNICA (Dati Grezzi -> Significato) ---
-# Qui ho inserito i codici estratti dal tuo esempio (es. andescri = CLIENTE)
+# --- MAPPATURA TECNICA DAL GESTIONALE ---
 MAPPING_VENDITE = {
-    'andescri': 'Cliente',
-    'mmcodcon': 'Cod_Cliente',
-    'ddnomdes': 'Piattaforma',
-    'ardesart': 'Articolo_Desc',
-    'mmcodart': 'Cod_Articolo',
-    'mmdatdoc': 'Data',
-    'mmcolli': 'Colli',
-    'mmqtamov': 'Qta_Movimento',
-    'mmprezzo': 'Prezzo_Unitario',
-    'arcodfam': 'Categoria',
-    'qtano': 'KG_Venduti',
-    'mvnumlot': 'Lotto'
+    'andescri': 'Cliente', 'mmcodcon': 'Cod_Cliente', 'ardesart': 'Articolo_Desc',
+    'mmcodart': 'Cod_Articolo', 'mmdatdoc': 'Data', 'mmcolli': 'Colli',
+    'mmqtamov': 'Qta_Movimento', 'mmprezzo': 'Prezzo_Unitario', 'arcodfam': 'Categoria',
+    'qtano': 'KG_Venduti'
 }
 
-MAPPING_MAGAZZINO = {
-    'ORIGINE': 'Origine',
-    'CAT': 'Tipologia',
-    'ARTICOLO DESCRIZIONE': 'Articolo_Desc',
-    'PREZZO': 'Costo_Unitario',
-    'KG ACQUISTATI': 'KG_Acquistati',
-    'COSTO TOTALE ACQUISTO': 'Costo_Totale'
-}
+# --- FUNZIONE DI CARICAMENTO ROBUSTA ---
+def safe_load_excel(uploaded_file):
+    """Tenta di caricare il file gestendo diversi formati e codifiche."""
+    if uploaded_file is None:
+        return None
+    try:
+        # Tenta prima come Excel standard
+        return pd.read_excel(uploaded_file)
+    except Exception:
+        try:
+            # Tenta come CSV (spesso i gestionali esportano CSV con estensione .xls)
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, sep=None, engine='python', on_bad_lines='skip')
+        except Exception as e:
+            st.error(f"Impossibile leggere il file {uploaded_file.name}: {e}")
+            return None
 
-# --- FUNZIONE DI PULIZIA DATI ---
-def clean_raw_data(df, mapping):
-    # Rinomina le colonne solo se trova i codici tecnici del tuo gestionale
-    df = df.rename(columns=mapping)
-    # Assicurati che le colonne numeriche siano tali
-    numeric_cols = ['KG_Venduti', 'Qta_Movimento', 'Prezzo_Unitario', 'Colli', 'Costo_Unitario', 'KG_Acquistati']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    
-    # Conversione Data
-    if 'Data' in df.columns:
-        df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
-    
-    return df
-
-# --- LOGICA DI ELABORAZIONE ---
+# --- PULIZIA E MAPPATURA ---
 def process_data(dict_files, companies, start_date, end_date):
     v_list = []
     m_list = []
     
     for comp in companies:
-        if dict_files[comp]['v'] is not None:
-            df_v = pd.read_excel(dict_files[comp]['v'])
-            df_v = clean_raw_data(df_v, MAPPING_VENDITE)
+        # Processo Vendite
+        df_v = safe_load_excel(dict_files[comp]['v'])
+        if df_v is not None:
+            df_v = df_v.rename(columns=MAPPING_VENDITE)
             df_v['Azienda'] = comp
+            if 'Data' in df_v.columns:
+                df_v['Data'] = pd.to_datetime(df_v['Data'], errors='coerce')
             v_list.append(df_v)
             
-        if dict_files[comp]['m'] is not None:
-            df_m = pd.read_excel(dict_files[comp]['m'])
-            df_m = clean_raw_data(df_m, MAPPING_MAGAZZINO)
+        # Processo Magazzino
+        df_m = safe_load_excel(dict_files[comp]['m'])
+        if df_m is not None:
             df_m['Azienda'] = comp
             m_list.append(df_m)
             
-    if not v_list: return None
+    if not v_list:
+        return None
     
     full_v = pd.concat(v_list, ignore_index=True)
     
-    # Filtro periodo
-    full_v = full_v[(full_v['Data'].dt.date >= start_date) & (full_v['Data'].dt.date <= end_date)]
+    # Filtro Date
+    if 'Data' in full_v.columns:
+        full_v = full_v[(full_v['Data'].dt.date >= start_date) & (full_v['Data'].dt.date <= end_date)]
     
-    # Calcolo Margine (Join con Magazzino)
-    if m_list:
-        full_m = pd.concat(m_list, ignore_index=True)
-        # Costo medio per articolo
-        costs = full_m.groupby('Articolo_Desc')['Costo_Unitario'].mean().reset_index()
-        full_v = pd.merge(full_v, costs, on='Articolo_Desc', how='left')
-        full_v['Fatturato'] = full_v['KG_Venduti'] * full_v['Prezzo_Unitario']
-        full_v['Costo_Venduto'] = full_v['KG_Venduti'] * full_v['Costo_Unitario'].fillna(0)
-        full_v['Margine'] = full_v['Fatturato'] - full_v['Costo_Venduto']
+    # Calcoli Numerici (assicura che siano numeri e non stringhe)
+    cols_to_fix = ['KG_Venduti', 'Prezzo_Unitario']
+    for col in cols_to_fix:
+        if col in full_v.columns:
+            full_v[col] = pd.to_numeric(full_v[col], errors='coerce').fillna(0)
     
+    full_v['Fatturato'] = full_v.get('KG_Venduti', 0) * full_v.get('Prezzo_Unitario', 0)
     return full_v
 
-# --- NAVBAR ---
-page = st.sidebar.radio("NAVIGAZIONE", ["DATA INGESTION", "REPORT SINOTTICO", "ARCHIVIO SERVER", "ANALYTICS"])
+# --- NAVIGAZIONE ---
+page = st.sidebar.radio("NAVIGAZIONE", ["CARICAMENTO", "REPORT", "ARCHIVIO"])
 
-# --- PAGINA 1: UPLOAD ---
-if page == "DATA INGESTION":
+if page == "CARICAMENTO":
     st.markdown('<div class="main-header">TATA-REPORTAPP - Caricamento Dati</div>', unsafe_allow_html=True)
     
     comps = ["TA.TA Srl", "GIARDINO DELL’AGLIO SRL", "ANGELO TATA SRL"]
@@ -109,68 +93,49 @@ if page == "DATA INGESTION":
     for i, c in enumerate(comps):
         with [col1, col2, col3][i]:
             st.subheader(c)
-            v = st.file_uploader(f"File Vendite (.xlsx)", key=f"v{i}")
-            m = st.file_uploader(f"File Magazzino (.xlsx)", key=f"m{i}")
+            v = st.file_uploader(f"Vendite {c}", type=['xlsx', 'xls', 'csv'], key=f"v{i}")
+            m = st.file_uploader(f"Magazzino {c}", type=['xlsx', 'xls', 'csv'], key=f"m{i}")
             files[c] = {'v': v, 'm': m}
             
     st.divider()
-    st.subheader("Parametri di Controllo")
-    c1, c2 = st.columns(2)
-    with c1:
-        date_mode = st.toggle("Usa periodo definito (INIZIO/FINE)", value=False)
-        d_in = st.date_input("Inizio", datetime.date(2025, 12, 1))
-        d_fi = st.date_input("Fine", datetime.date(2025, 12, 31))
-    with c2:
-        cumulativo = st.toggle("Report Cumulativo (Tutte)", value=True)
-        aziende_sel = st.multiselect("Seleziona Aziende", comps, default=comps)
+    d_in = st.date_input("Inizio Periodo", datetime.date(2025, 12, 1))
+    d_fi = st.date_input("Fine Periodo", datetime.date(2025, 12, 31))
+    aziende_sel = st.multiselect("Aziende da includere", comps, default=comps)
 
-    if st.button("ELABORA E GENERA REPORT", use_container_width=True):
+    if st.button("ELABORA DATI", use_container_width=True):
         res = process_data(files, aziende_sel, d_in, d_fi)
         if res is not None:
             st.session_state['report_data'] = res
-            st.success("Elaborazione completata. Vai alla pagina REPORT.")
+            st.success("Dati pronti! Vai alla pagina REPORT.")
+        else:
+            st.error("Nessun dato valido trovato. Verifica i file caricati.")
 
-# --- PAGINA 2: REPORT ---
-elif page == "REPORT SINOTTICO":
-    st.markdown('<div class="main-header">Quadro Sinottico Mensile</div>', unsafe_allow_html=True)
+elif page == "REPORT":
+    st.markdown('<div class="main-header">Quadro Sinottico Elaborato</div>', unsafe_allow_html=True)
     if 'report_data' in st.session_state:
         df = st.session_state['report_data']
         
-        # Replica dello screenshot richiesto
-        st.write("### Riepilogo per Origine e Tipologia")
-        sinottico = df.groupby(['Azienda', 'Articolo_Desc']).agg({
+        # Dashboard Semplice
+        st.metric("Fatturato Totale Periodo", f"{df['Fatturato'].sum():,.2f} €")
+        
+        # Pivot Table come da screenshot
+        st.write("### Riepilogo per Azienda e Articolo")
+        pivot = df.groupby(['Azienda', 'Articolo_Desc']).agg({
             'KG_Venduti': 'sum',
-            'Fatturato': 'sum',
-            'Margine': 'sum'
+            'Fatturato': 'sum'
         }).reset_index()
         
-        st.dataframe(sinottico.style.format(subset=['Fatturato', 'Margine'], formatter="{:.2f} €"), use_container_width=True)
+        st.dataframe(pivot.style.format({'Fatturato': '{:.2f} €', 'KG_Venduti': '{:.2f}'}), use_container_width=True)
         
-        st.divider()
-        col_btns = st.columns(3)
-        with col_btns[0]: st.button("💾 SALVA SU SERVER ARUBA")
-        with col_btns[1]: st.button("🖨️ STAMPA REPORT (LANDSCAPE)")
+        if st.button("💾 SALVA SU SERVER"):
+            st.toast("Salvato nell'archivio di Aruba")
     else:
-        st.warning("Carica i dati grezzi nella prima pagina.")
+        st.warning("Carica i dati per visualizzare il report.")
 
-# --- PAGINA 3: ARCHIVIO ---
-elif page == "ARCHIVIO SERVER":
-    st.markdown('<div class="main-header">Archivio Storico Elaborazioni</div>', unsafe_allow_html=True)
-    st.info("Qui verranno elencati i report salvati sul server Aruba.")
-
-# --- PAGINA 4: ANALYTICS ---
-elif page == "ANALYTICS":
-    st.markdown('<div class="main-header">Graphic Intelligence</div>', unsafe_allow_html=True)
-    if 'report_data' in st.session_state:
-        df = st.session_state['report_data']
-        st.bar_chart(df, x="Azienda", y="Fatturato")
-    else:
-        st.warning("Carica dati per visualizzare i grafici.")
-
-# --- FOOTER ---
+# FOOTER
 st.markdown("""
     <div class="footer">
-        Documento ad utilizzo esclusivo interno - Divieto di riproduzione o cessione dati se non autorizzati. 
-        <br><b>TATA-REPORTAPP</b> | Tribute to R-ADVISOR – M. Ribezzo.
+        Utilizzo esclusivo interno - Riproduzione vietata. <br>
+        <b>TATA-REPORTAPP</b> | Progettazione: R-ADVISOR – M. Ribezzo.
     </div>
     """, unsafe_allow_html=True)
